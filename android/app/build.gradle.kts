@@ -25,10 +25,10 @@ android {
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
-        // Flutter controls APK ABI filtering, including --split-per-abi.
+        // Handoff ships 64-bit ARM only.
         externalNativeBuild {
             cmake {
-                abiFilters += listOf("armeabi-v7a", "arm64-v8a", "x86_64")
+                abiFilters += listOf("arm64-v8a")
             }
         }
     }

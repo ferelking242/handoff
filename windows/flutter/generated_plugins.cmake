@@ -17,11 +17,11 @@ list(APPEND FLUTTER_PLUGIN_LIST
   record_windows
   restart_app
   screen_retriever_windows
-  share_plus
   speech_to_text_windows
   super_native_extensions
   tray_manager
   url_launcher_windows
+  share_plus
   webview_windows
   window_manager
 )
