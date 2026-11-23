@@ -71,11 +71,13 @@ jobs:
       - name: Verify ABI and signature
         run: |
           APK=build/app/outputs/flutter-apk/app-release.apk
+          # lib/ also holds asset folders such as lib/katex_fonts, so match
+          # only the names Android treats as ABIs.
+          ABIS=$(unzip -l "$APK" | grep -oE 'lib/(armeabi-v7a|x86|x86_64|arm64-v8a|mips|mips64)/' | sort -u || true)
           echo "ABIs in the APK:"
-          unzip -l "$APK" | grep -o 'lib/[^/]*/' | sort -u
-          EXTRA=$(unzip -l "$APK" | grep -o 'lib/[^/]*/' | sort -u | grep -v 'lib/arm64-v8a/' || true)
-          if [ -n "$EXTRA" ]; then
-            echo "::error::unexpected ABIs: $EXTRA"
+          echo "$ABIS"
+          if [ "$ABIS" != "lib/arm64-v8a/" ]; then
+            echo "::error::expected arm64-v8a only, got: $ABIS"
             exit 1
           fi
           APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner 2>/dev/null | sort -V | tail -1)
