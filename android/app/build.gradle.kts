@@ -25,11 +25,11 @@ android {
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
-        // Handoff ships 64-bit ARM only.
-        externalNativeBuild {
-            cmake {
-                abiFilters += listOf("arm64-v8a")
-            }
+        // Handoff ships 64-bit ARM only. The ndk block, not the cmake one,
+        // also strips prebuilt .so files coming from plugins.
+        ndk {
+            abiFilters.clear()
+            abiFilters += listOf("arm64-v8a")
         }
     }
 
