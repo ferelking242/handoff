@@ -241,6 +241,13 @@ flutter:
     - assets/skills/visualize/
     - assets/skills/visualize/references/
     - assets/model_catalog/models_dev.json
+  fonts:
+    - family: broken
+      fonts:
+        - asset: assets/fonts/broken.ttf
+    - family: broken_filled
+      fonts:
+        - asset: assets/fonts/broken_filled.ttf
   #   - images/a_dot_ham.jpeg
 
   # An image asset can refer to one or more resolution-specific "variants", see

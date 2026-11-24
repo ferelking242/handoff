@@ -10,10 +10,8 @@ import 'package:flutter/foundation.dart'
 import 'dart:async';
 import 'dart:ui' show AppExitResponse;
 import 'l10n/app_localizations.dart';
-import 'features/home/pages/home_page.dart';
 import 'features/migration/hive_to_sqlite_migration_page.dart';
 import 'features/migration/hive_to_sqlite_migration_service.dart';
-import 'desktop/desktop_home_page.dart';
 import 'package:flutter/services.dart';
 import 'package:visibility_detector/visibility_detector.dart';
 import 'package:window_manager/window_manager.dart';
@@ -31,6 +29,8 @@ import 'theme/custom_theme.dart';
 import 'package:provider/provider.dart';
 import 'package:dynamic_color/dynamic_color.dart';
 import 'core/providers/user_provider.dart';
+import 'features/openhands/pages/home_page.dart';
+import 'features/openhands/providers/openhands_provider.dart';
 import 'core/providers/settings_provider.dart';
 import 'core/providers/mcp_provider.dart';
 import 'core/providers/tts_provider.dart';
@@ -859,6 +859,7 @@ class MyApp extends StatelessWidget {
         ChangeNotifierProvider(
           create: (_) => UserProvider(preferences: businessPreferences),
         ),
+        ChangeNotifierProvider(create: (_) => OpenHandsProvider()),
         ChangeNotifierProvider(create: (_) => chatService),
         ChangeNotifierProvider(create: (_) => McpToolService()),
         ChangeNotifierProvider(create: (_) => ToolApprovalService()),
@@ -1257,7 +1258,7 @@ class MyApp extends StatelessWidget {
               // debugPrint('[Theme/App] Dark scaffoldBg=${dark.colorScheme.surface.value.toRadixString(16)} card≈${dark.colorScheme.surface.value.toRadixString(16)} shadow=${dark.colorScheme.shadow.value.toRadixString(16)}');
               return MaterialApp(
                 debugShowCheckedModeBanner: false,
-                title: 'Kelivo',
+                title: 'Handoff',
                 navigatorKey: rootNavigatorKey,
                 // App UI language; null = follow system (respects iOS per-app language)
                 locale: settings.appLocaleForMaterialApp,
@@ -1297,9 +1298,6 @@ class MyApp extends StatelessWidget {
                   if (!_didEnsureAssistants) {
                     _didEnsureAssistants = true;
                     WidgetsBinding.instance.addPostFrameCallback((_) {
-                      try {
-                        ctx.read<AssistantProvider>().ensureDefaults(ctx);
-                      } catch (_) {}
                       try {
                         ctx.read<ChatService>().setDefaultConversationTitle(
                           AppLocalizations.of(
@@ -1408,13 +1406,7 @@ class MyApp extends StatelessWidget {
 }
 
 Widget _selectHome() {
-  // Mobile remains the default platform. Desktop is an added platform.
-  if (kIsWeb) return const HomePage();
-  final isDesktop =
-      defaultTargetPlatform == TargetPlatform.macOS ||
-      defaultTargetPlatform == TargetPlatform.windows ||
-      defaultTargetPlatform == TargetPlatform.linux;
-  return isDesktop ? const DesktopHomePage() : const HomePage();
+  return const HandoffRoot();
 }
 
 // Overrides logic is implemented within SettingsProvider now.
