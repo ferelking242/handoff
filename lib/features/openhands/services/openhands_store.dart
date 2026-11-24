@@ -79,15 +79,34 @@ class OpenHandsStore {
 
   Future<GuardConfig> readGuardConfig() async {
     final prefs = await _preferences;
+    String? key;
+    try {
+      key = await _secureStorage.read(key: guardKeyKey);
+    } catch (error) {
+      debugPrint('OpenHandsStore: secure read failed: $error');
+    }
+    key ??= prefs.getString(guardKeyKey);
     return GuardConfig(
       url: prefs.getString(guardUrlKey) ?? '',
-      key: prefs.getString(guardKeyKey) ?? '',
+      key: key ?? '',
     );
   }
 
   Future<void> writeGuardConfig(GuardConfig config) async {
     final prefs = await _preferences;
     await prefs.setString(guardUrlKey, config.url.trim());
-    await prefs.setString(guardKeyKey, config.key.trim());
+    final key = config.key.trim();
+    var stored = false;
+    try {
+      await _secureStorage.write(key: guardKeyKey, value: key);
+      stored = true;
+    } catch (error) {
+      debugPrint('OpenHandsStore: secure write failed: $error');
+    }
+    if (stored) {
+      await prefs.remove(guardKeyKey);
+    } else {
+      await prefs.setString(guardKeyKey, key);
+    }
   }
 }

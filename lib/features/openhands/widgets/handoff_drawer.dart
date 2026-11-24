@@ -272,6 +272,7 @@ class _ConversationList extends StatelessWidget {
     return RefreshIndicator(
       onRefresh: provider.refreshConversations,
       child: ListView.builder(
+        physics: const AlwaysScrollableScrollPhysics(),
         padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
         itemCount: provider.conversations.length + (provider.hasMoreConversations ? 1 : 0),
         itemBuilder: (context, index) {
