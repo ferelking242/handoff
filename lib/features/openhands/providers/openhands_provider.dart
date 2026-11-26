@@ -4,21 +4,28 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:url_launcher/url_launcher.dart';
+import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../models/openhands_models.dart';
 import '../services/openhands_api.dart';
+import '../services/openhands_cache.dart';
 import '../services/openhands_store.dart';
 
 enum OpenHandsAuthStatus { loading, signedOut, signingIn, signedIn, error }
 
 /// Owns the OpenHands session, the conversation list and the open timeline.
 class OpenHandsProvider extends ChangeNotifier {
-  OpenHandsProvider({OpenHandsStore? store, OpenHandsApi? api})
-    : _store = store ?? OpenHandsStore(),
-      _api = api ?? OpenHandsApi();
+  OpenHandsProvider({
+    OpenHandsStore? store,
+    OpenHandsApi? api,
+    OpenHandsCache? cache,
+  })  : _store = store ?? OpenHandsStore(),
+        _api = api ?? OpenHandsApi(),
+        _cache = cache ?? OpenHandsCache();
 
   final OpenHandsStore _store;
   final OpenHandsApi _api;
+  final OpenHandsCache _cache;
 
   OpenHandsAuthStatus _authStatus = OpenHandsAuthStatus.loading;
   OpenHandsAuthStatus get authStatus => _authStatus;
@@ -81,15 +88,45 @@ class OpenHandsProvider extends ChangeNotifier {
   bool _guardTesting = false;
   bool get guardTesting => _guardTesting;
 
-  Timer? _pollTimer;
   Timer? _deviceTimer;
-  bool _polling = false;
-  int _pollGeneration = 0;
   int _deviceGeneration = 0;
+  Timer? _socketRetryTimer;
+  WebSocketChannel? _socket;
+  int _socketGeneration = 0;
+  int _lastSeq = -1;
+  bool _historyLoaded = false;
+  final List<OpenHandsEvent> _events = [];
+  final Map<String, _StreamingSlot> _streaming = {};
+  final List<HandoffTimelineItem> _optimistic = [];
+
+  List<OpenHandsFolder> _folders = const [];
+  List<OpenHandsFolder> get folders => _folders;
+
+  Set<String> _archivedIds = <String>{};
+  Set<String> get archivedIds => _archivedIds;
+
+  final Set<String> _collapsedFolders = <String>{};
+  bool isFolderExpanded(String folderId) =>
+      !_collapsedFolders.contains(folderId);
 
   bool get isSignedIn => _authStatus == OpenHandsAuthStatus.signedIn;
 
-  bool get agentRunning => _active?.isRunning ?? false;
+  bool get agentRunning => _streaming.isNotEmpty || (_active?.isRunning ?? false);
+
+  List<OpenHandsConversation> get visibleConversations => _conversations
+      .where((conversation) => !_archivedIds.contains(conversation.id))
+      .toList(growable: false);
+
+  List<OpenHandsConversation> get archivedConversations => _conversations
+      .where((conversation) => _archivedIds.contains(conversation.id))
+      .toList(growable: false);
+
+  OpenHandsFolder? folderForConversation(String conversationId) {
+    for (final folder in _folders) {
+      if (folder.conversationIds.contains(conversationId)) return folder;
+    }
+    return null;
+  }
 
   String? get activeModel => _active?.llmModel ?? _user?.llmModel;
 
@@ -97,6 +134,8 @@ class OpenHandsProvider extends ChangeNotifier {
     final savedBaseUrl = await _store.readBaseUrl();
     _api.updateBaseUrl(savedBaseUrl);
     _guard = await _store.readGuardConfig();
+    _folders = await _store.readFolders();
+    _archivedIds = await _store.readArchivedIds();
 
     final token = await _store.readToken();
     if (token == null || token.isEmpty) {
@@ -289,9 +328,8 @@ class OpenHandsProvider extends ChangeNotifier {
   }
 
   Future<void> signOut() async {
-    _pollGeneration++;
-    _pollTimer?.cancel();
-    _pollTimer = null;
+    _socketGeneration++;
+    _cancelSocket();
     _deviceGeneration++;
     _deviceTimer?.cancel();
     await _store.clearToken();
@@ -301,6 +339,11 @@ class OpenHandsProvider extends ChangeNotifier {
     _nextPageId = null;
     _active = null;
     _timeline = const [];
+    _events.clear();
+    _streaming.clear();
+    _optimistic.clear();
+    _historyLoaded = false;
+    _lastSeq = -1;
     _deviceNotice = null;
     _authStatus = OpenHandsAuthStatus.signedOut;
     _error = null;
@@ -380,35 +423,63 @@ class OpenHandsProvider extends ChangeNotifier {
   // ---------------------------------------------------------------------
 
   Future<void> openConversation(OpenHandsConversation conversation) async {
-    _pollGeneration++;
-    _pollTimer?.cancel();
+    final generation = ++_socketGeneration;
+    _cancelSocket();
     _active = conversation;
+    _events.clear();
+    _streaming.clear();
+    _optimistic.clear();
+    _lastSeq = -1;
+    _historyLoaded = false;
     _timeline = const [];
     _timelineError = null;
     _timelineLoading = true;
     notifyListeners();
 
-    final generation = _pollGeneration;
     try {
+      CachedConversationHistory cached;
+      try {
+        cached = await _cache.read(conversation.id);
+      } catch (_) {
+        cached = const CachedConversationHistory();
+      }
+      if (generation != _socketGeneration) return;
+      if (!cached.isEmpty) {
+        for (final event in cached.events) {
+          _upsertEvent(event);
+        }
+        _sortEvents();
+        _lastSeq = cached.lastSeq ?? -1;
+        _historyLoaded = true;
+        _rebuildTimeline();
+        _timelineLoading = false;
+        notifyListeners();
+      }
+
       var fresh = await _api.getConversation(conversation.id);
-      if (generation != _pollGeneration) return;
+      if (generation != _socketGeneration) return;
       if ((fresh.isPaused || !fresh.canStream) && fresh.canResume) {
         fresh = await _wakeSandbox(fresh, generation);
-        if (generation != _pollGeneration) return;
+        if (generation != _socketGeneration) return;
       }
       _active = fresh;
       _replaceInList(fresh);
-      await _loadEvents(generation, initial: true);
-      _startPolling(generation);
+      _rebuildTimeline();
+
+      if (!_historyLoaded) {
+        await _loadAllEvents(fresh, generation);
+        if (generation != _socketGeneration) return;
+      }
+      _connectSocket(fresh, generation);
     } catch (error) {
-      if (generation != _pollGeneration) return;
+      if (generation != _socketGeneration) return;
       if (_isAuthError(error)) {
         await _expireSession();
         return;
       }
       _timelineError = _describeError(error);
     } finally {
-      if (generation == _pollGeneration) {
+      if (generation == _socketGeneration) {
         _timelineLoading = false;
         notifyListeners();
       }
@@ -430,7 +501,7 @@ class OpenHandsProvider extends ChangeNotifier {
     final deadline = DateTime.now().add(const Duration(seconds: 45));
     while (DateTime.now().isBefore(deadline)) {
       await Future<void>.delayed(const Duration(seconds: 2));
-      if (generation != _pollGeneration) return latest;
+      if (generation != _socketGeneration) return latest;
       try {
         latest = await _api.getConversation(conversation.id);
       } catch (_) {
@@ -441,118 +512,302 @@ class OpenHandsProvider extends ChangeNotifier {
     return latest;
   }
 
+  /// Pulls the complete event log once, then stores it locally. Future opens
+  /// read the cache and only ask the socket for events after `_lastSeq`.
+  Future<void> _loadAllEvents(
+    OpenHandsConversation conversation,
+    int generation,
+  ) async {
+    try {
+      final all = <OpenHandsEvent>[];
+      final seenIds = <String>{};
+      final seenPages = <String>{};
+      String? pageId;
+      while (true) {
+        final page = await _api.searchEvents(
+          conversation,
+          limit: 100,
+          pageId: pageId,
+          sortOrder: 'TIMESTAMP',
+        );
+        if (generation != _socketGeneration) return;
+        for (final event in page.items) {
+          if (seenIds.add(event.id)) all.add(event);
+        }
+        final next = page.nextPageId;
+        if (next == null || next.isEmpty || !seenPages.add(next)) break;
+        pageId = next;
+        if (all.length >= 20000) break;
+      }
+      if (generation != _socketGeneration) return;
+      _events
+        ..clear()
+        ..addAll(all);
+      _sortEvents();
+      _historyLoaded = true;
+      try {
+        await _cache.writeSnapshot(conversation.id, _events);
+      } catch (_) {
+        // History is already in memory; the cache is an optimization.
+      }
+      _rebuildTimeline();
+      notifyListeners();
+    } catch (error) {
+      if (generation != _socketGeneration) return;
+      _timelineError = _describeError(error);
+      notifyListeners();
+    }
+  }
+
+  void _connectSocket(OpenHandsConversation conversation, int generation) {
+    if (generation != _socketGeneration) return;
+    if (!conversation.canStream) {
+      _timelineError =
+          'This conversation has no live sandbox. Wake it in OpenHands first.';
+      notifyListeners();
+      return;
+    }
+
+    _cancelSocket();
+    try {
+      final uri = _api.sessionSocketUri(conversation, afterSeq: _lastSeq);
+      final socket = WebSocketChannel.connect(uri);
+      _socket = socket;
+
+      unawaited(
+        socket.ready.then((_) {
+          if (generation != _socketGeneration ||
+              !identical(_socket, socket)) {
+            return;
+          }
+          final key = conversation.sessionApiKey;
+          if (key != null && key.isNotEmpty) {
+            socket.sink.add(
+              jsonEncode({'type': 'auth', 'session_api_key': key}),
+            );
+          }
+        }).catchError((Object error) {
+          _handleSocketClosed(conversation, generation, error, socket);
+        }),
+      );
+
+      socket.stream.listen(
+        (message) => _handleSocketFrame(message, conversation, generation),
+        onError: (Object error) =>
+            _handleSocketClosed(conversation, generation, error, socket),
+        onDone: () =>
+            _handleSocketClosed(conversation, generation, null, socket),
+        cancelOnError: true,
+      );
+    } catch (error) {
+      _handleSocketClosed(conversation, generation, error);
+    }
+  }
+
+  void _handleSocketClosed(
+    OpenHandsConversation conversation,
+    int generation,
+    Object? error, [
+    WebSocketChannel? closedSocket,
+  ]) {
+    if (generation != _socketGeneration) return;
+    // A replaced socket can close after its replacement is live.
+    if (closedSocket != null && !identical(_socket, closedSocket)) return;
+    _socket = null;
+    if (error != null) {
+      debugPrint('OpenHands socket closed: $error');
+    }
+    _socketRetryTimer?.cancel();
+    _socketRetryTimer = Timer(const Duration(seconds: 2), () {
+      if (generation == _socketGeneration && _active?.id == conversation.id) {
+        _connectSocket(conversation, generation);
+      }
+    });
+  }
+
+  void _handleSocketFrame(
+    dynamic message,
+    OpenHandsConversation conversation,
+    int generation,
+  ) {
+    if (generation != _socketGeneration) return;
+    final Map<String, dynamic> frame;
+    try {
+      final decoded = jsonDecode(message.toString());
+      if (decoded is! Map) return;
+      frame = decoded.cast<String, dynamic>();
+    } catch (_) {
+      return;
+    }
+
+    switch (frame['type']) {
+      case 'durable':
+        final rawEvent = frame['event'];
+        if (rawEvent is! Map) return;
+        final event = OpenHandsEvent.fromJson(
+          rawEvent.cast<String, dynamic>(),
+        );
+        final seq = frame['seq'];
+        if (seq is num) {
+          final value = seq.toInt();
+          if (value > _lastSeq) _lastSeq = value;
+          unawaited(_cache.append(conversation.id, value, event));
+        }
+        _upsertEvent(event);
+        _sortEvents();
+        _streaming.remove(event.id);
+        _historyLoaded = true;
+        _timelineError = null;
+        _handleStateEvent(event);
+        _removeOptimisticFor(event);
+        _rebuildTimeline();
+        notifyListeners();
+      case 'transient':
+        final rawEvent = frame['event'];
+        if (rawEvent is Map) {
+          _handleStateEvent(
+            OpenHandsEvent.fromJson(rawEvent.cast<String, dynamic>()),
+          );
+          _rebuildTimeline();
+          notifyListeners();
+        }
+      case 'item_started':
+        final id = (frame['item_id'] ?? '').toString();
+        if (id.isEmpty) return;
+        _streaming[id] = _StreamingSlot(startedAt: DateTime.now());
+        _rebuildTimeline();
+        notifyListeners();
+      case 'delta':
+        final id = (frame['item_id'] ?? '').toString();
+        final content = (frame['content'] ?? '').toString();
+        if (id.isEmpty || content.isEmpty) return;
+        if ((frame['kind'] ?? 'text').toString() == 'reasoning') return;
+        final slot = _streaming.putIfAbsent(
+          id,
+          () => _StreamingSlot(startedAt: DateTime.now()),
+        );
+        slot.text += content;
+        _rebuildTimeline();
+        notifyListeners();
+      case 'item_aborted':
+        final id = (frame['item_id'] ?? '').toString();
+        if (id.isEmpty) return;
+        _streaming.remove(id);
+        _rebuildTimeline();
+        notifyListeners();
+      case 'error':
+        _timelineError = (frame['detail'] ?? frame['code'] ?? 'The event stream failed.').toString();
+        notifyListeners();
+      default:
+        return;
+    }
+  }
+
+  void _sortEvents() {
+    final indexed = _events.indexed.toList(growable: false);
+    indexed.sort((a, b) {
+      final left = a.$2.timestamp;
+      final right = b.$2.timestamp;
+      if (left == null || right == null) return a.$1.compareTo(b.$1);
+      final byTime = left.compareTo(right);
+      return byTime == 0 ? a.$1.compareTo(b.$1) : byTime;
+    });
+    _events
+      ..clear()
+      ..addAll(indexed.map((entry) => entry.$2));
+  }
+
+  void _upsertEvent(OpenHandsEvent event) {
+    final index = _events.indexWhere((item) => item.id == event.id);
+    if (index == -1) {
+      _events.add(event);
+    } else {
+      _events[index] = event;
+    }
+  }
+
+  void _handleStateEvent(OpenHandsEvent event) {
+    if (event.kind != 'ConversationStateUpdateEvent') return;
+    final key = event.raw['key']?.toString();
+    final value = event.raw['value']?.toString();
+    if (key == null || value == null || value.isEmpty) return;
+    if (key == 'execution_status') {
+      _active = _active?.copyWith(executionStatus: value);
+    } else if (key == 'sandbox_status') {
+      _active = _active?.copyWith(sandboxStatus: value);
+    }
+    final current = _active;
+    if (current != null) _replaceInList(current);
+  }
+
+  void _removeOptimisticFor(OpenHandsEvent event) {
+    if (event.kind != 'MessageEvent') return;
+    final message = event.raw['llm_message'] ?? event.raw['message'];
+    final role = message is Map
+        ? (message['role'] ?? event.source).toString()
+        : event.source;
+    if (role != 'user') return;
+    final text = contentToText(message is Map ? message['content'] : message).trim();
+    if (text.isEmpty) return;
+    _optimistic.removeWhere((item) => item.text.trim() == text);
+  }
+
+  void _rebuildTimeline() {
+    final mapped = _mapEvents(_events);
+    for (final entry in _streaming.entries) {
+      if (entry.value.text.trim().isEmpty) continue;
+      mapped.add(
+        HandoffTimelineItem(
+          id: 'stream:${entry.key}',
+          kind: HandoffItemKind.assistant,
+          text: entry.value.text,
+          running: true,
+          at: entry.value.startedAt,
+        ),
+      );
+    }
+    mapped.addAll(_optimistic);
+    _timeline = mapped;
+  }
+
+  void _cancelSocket() {
+    _socketRetryTimer?.cancel();
+    _socketRetryTimer = null;
+    final socket = _socket;
+    _socket = null;
+    try {
+      socket?.sink.close();
+    } catch (_) {
+      // The socket may already be gone.
+    }
+  }
+
   void closeConversation() {
-    _pollGeneration++;
-    _pollTimer?.cancel();
-    _pollTimer = null;
+    _socketGeneration++;
+    _cancelSocket();
     _active = null;
+    _events.clear();
+    _streaming.clear();
+    _optimistic.clear();
+    _historyLoaded = false;
+    _lastSeq = -1;
     _timeline = const [];
     _timelineError = null;
     _timelineLoading = false;
     notifyListeners();
   }
 
-  void _startPolling(int generation) {
-    _pollTimer?.cancel();
-    var tick = 0;
-    _pollTimer = Timer.periodic(const Duration(milliseconds: 2500), (_) async {
-      if (generation != _pollGeneration) return;
-      tick++;
-      if (tick % 2 == 0) {
-        await _refreshActiveConversation(generation);
-      }
-      await _loadEvents(generation);
-    });
-  }
-
-  Future<void> _refreshActiveConversation(int generation) async {
+  Future<void> refreshTimeline() async {
     final current = _active;
     if (current == null) return;
-    try {
-      final fresh = await _api.getConversation(current.id);
-      if (generation != _pollGeneration) return;
-      final statusChanged = fresh.executionStatus != current.executionStatus;
-      _active = fresh;
-      _replaceInList(fresh);
-      if (statusChanged) notifyListeners();
-    } catch (_) {
-      // Status refreshes are best effort; event polling still runs.
-    }
-  }
-
-  Future<void> _loadEvents(int generation, {bool initial = false}) async {
-    final current = _active;
-    if (current == null || !current.canStream) {
-      if (initial && current != null && current.canResume) {
-        _timelineError = 'Waking the sandbox…';
-        notifyListeners();
-        final woken = await _wakeSandbox(current, generation);
-        if (generation != _pollGeneration) return;
-        _active = woken;
-        _replaceInList(woken);
-        if (woken.canStream) {
-          _timelineError = null;
-          notifyListeners();
-          await _loadEvents(generation, initial: true);
-        } else {
-          _timelineError =
-              'This conversation has no live sandbox yet. Try again in a moment.';
-          notifyListeners();
-        }
-      } else if (initial && current != null) {
-        _timelineError =
-            'This conversation has no live sandbox. Wake it in OpenHands first.';
-        notifyListeners();
-      }
-      return;
-    }
-    if (_polling && !initial) return;
-    _polling = true;
-    try {
-      final page = await _api.searchEvents(
-        current,
-        limit: 100,
-        sortOrder: 'TIMESTAMP_DESC',
-      );
-      if (generation != _pollGeneration) return;
-
-      String? eventStatus;
-      for (final event in page.items) {
-        if (event.kind == 'ConversationStateUpdateEvent' &&
-            event.raw['key'] == 'execution_status') {
-          eventStatus = event.raw['value']?.toString();
-          break;
-        }
-      }
-
-      final ordered = page.items.reversed.toList(growable: false);
-      final mapped = _mapEvents(ordered);
-      var changed = !_sameTimeline(_timeline, mapped);
-      if (eventStatus != null &&
-          eventStatus.isNotEmpty &&
-          _active != null &&
-          _active!.executionStatus != eventStatus) {
-        _active = _active!.copyWith(executionStatus: eventStatus);
-        changed = true;
-      }
-      _timeline = mapped;
-      _timelineError = null;
-      if (changed) notifyListeners();
-    } catch (error) {
-      if (generation != _pollGeneration) return;
-      if (initial) {
-        _timelineError = _describeError(error);
-        notifyListeners();
-      }
-    } finally {
-      _polling = false;
-    }
-  }
-
-  Future<void> refreshTimeline() async {
-    final generation = _pollGeneration;
-    await _loadEvents(generation, initial: true);
+    _timelineError = null;
     notifyListeners();
+    final generation = _socketGeneration;
+    if (!_historyLoaded && _events.isEmpty) {
+      await _loadAllEvents(current, generation);
+      if (generation != _socketGeneration) return;
+    }
+    _connectSocket(current, generation);
   }
 
   void _replaceInList(OpenHandsConversation conversation) {
@@ -569,7 +824,7 @@ class OpenHandsProvider extends ChangeNotifier {
   }
 
   // ---------------------------------------------------------------------
-  // Sending
+  // Sending and conversation actions
   // ---------------------------------------------------------------------
 
   Future<bool> sendMessage(String text) async {
@@ -584,21 +839,42 @@ class OpenHandsProvider extends ChangeNotifier {
       text: trimmed,
       at: DateTime.now(),
     );
-    _timeline = [..._timeline, optimistic];
+    _optimistic.add(optimistic);
+    _rebuildTimeline();
     notifyListeners();
 
     try {
-      await _api.sendMessage(current, trimmed);
-      _active = _active?.copyWith(executionStatus: 'running');
-      final generation = _pollGeneration;
-      await _loadEvents(generation, initial: true);
+      final socket = _socket;
+      var sent = false;
+      if (socket != null) {
+        try {
+          await socket.ready.timeout(const Duration(seconds: 12));
+          socket.sink.add(
+            jsonEncode({
+              'role': 'user',
+              'content': [
+                {'type': 'text', 'text': trimmed},
+              ],
+              'run': true,
+            }),
+          );
+          sent = true;
+        } catch (_) {
+          // Fall back to the HTTP event endpoint below.
+        }
+      }
+      if (!sent) {
+        await _api.sendMessage(current, trimmed);
+      }
+      _active = _active?.copyWith(executionStatus: 'RUNNING');
       _sending = false;
       notifyListeners();
       return true;
     } catch (error) {
-      _timeline = _timeline.where((item) => item.id != optimistic.id).toList();
+      _optimistic.removeWhere((item) => item.id == optimistic.id);
       _timelineError = _describeError(error);
       _sending = false;
+      _rebuildTimeline();
       notifyListeners();
       return false;
     }
@@ -609,12 +885,199 @@ class OpenHandsProvider extends ChangeNotifier {
     if (current == null) return;
     try {
       await _api.interruptConversation(current);
-      await _refreshActiveConversation(_pollGeneration);
-      await _loadEvents(_pollGeneration, initial: true);
+      _active = _active?.copyWith(executionStatus: 'IDLE');
+      _streaming.clear();
+      _rebuildTimeline();
+      notifyListeners();
     } catch (error) {
       _timelineError = _describeError(error);
       notifyListeners();
     }
+  }
+
+  Future<bool> pauseConversation(OpenHandsConversation conversation) async {
+    final sandboxId = conversation.sandboxId;
+    if (sandboxId == null || sandboxId.isEmpty) return false;
+    try {
+      await _api.pauseSandbox(sandboxId);
+      _patchConversation(
+        conversation.id,
+        sandboxStatus: 'PAUSED',
+        executionStatus: 'PAUSED',
+      );
+      notifyListeners();
+      return true;
+    } catch (error) {
+      _conversationsError = _describeError(error);
+      notifyListeners();
+      return false;
+    }
+  }
+
+  Future<bool> resumeConversation(OpenHandsConversation conversation) async {
+    final sandboxId = conversation.sandboxId;
+    if (sandboxId == null || sandboxId.isEmpty) return false;
+    try {
+      await _api.resumeSandbox(sandboxId);
+      _patchConversation(conversation.id, sandboxStatus: 'STARTING');
+      notifyListeners();
+      final deadline = DateTime.now().add(const Duration(seconds: 45));
+      while (DateTime.now().isBefore(deadline)) {
+        await Future<void>.delayed(const Duration(seconds: 2));
+        try {
+          final fresh = await _api.getConversation(conversation.id);
+          _replaceInList(fresh);
+          if (_active?.id == fresh.id) {
+            _active = fresh;
+            if (fresh.canStream) {
+              _connectSocket(fresh, _socketGeneration);
+            }
+          }
+          if (fresh.canStream && !fresh.isPaused) {
+            notifyListeners();
+            return true;
+          }
+        } catch (_) {
+          // Keep polling until the sandbox answers.
+        }
+      }
+      notifyListeners();
+      return true;
+    } catch (error) {
+      _conversationsError = _describeError(error);
+      notifyListeners();
+      return false;
+    }
+  }
+
+  Future<bool> deleteConversation(OpenHandsConversation conversation) async {
+    try {
+      await _api.deleteConversation(conversation.id);
+    } catch (error) {
+      if (!_isAuthError(error)) {
+        _conversationsError = _describeError(error);
+        notifyListeners();
+        return false;
+      }
+      await _expireSession();
+      return false;
+    }
+
+    _conversations = _conversations
+        .where((item) => item.id != conversation.id)
+        .toList(growable: false);
+    _archivedIds = {..._archivedIds}..remove(conversation.id);
+    await _store.writeArchivedIds(_archivedIds);
+    await _cache.delete(conversation.id);
+    await _removeFromFolders(conversation.id);
+    if (_active?.id == conversation.id) {
+      closeConversation();
+    } else {
+      notifyListeners();
+    }
+    return true;
+  }
+
+  Future<void> archiveConversation(OpenHandsConversation conversation) async {
+    _archivedIds = {..._archivedIds, conversation.id};
+    await _store.writeArchivedIds(_archivedIds);
+    notifyListeners();
+  }
+
+  Future<void> unarchiveConversation(OpenHandsConversation conversation) async {
+    _archivedIds = {..._archivedIds}..remove(conversation.id);
+    await _store.writeArchivedIds(_archivedIds);
+    notifyListeners();
+  }
+
+  Future<void> createFolder(String name) async {
+    final trimmed = name.trim();
+    if (trimmed.isEmpty) return;
+    final folder = OpenHandsFolder(
+      id: 'folder-${DateTime.now().microsecondsSinceEpoch}',
+      name: trimmed,
+    );
+    _folders = [..._folders, folder];
+    await _store.writeFolders(_folders);
+    notifyListeners();
+  }
+
+  Future<void> renameFolder(String folderId, String name) async {
+    final trimmed = name.trim();
+    if (trimmed.isEmpty) return;
+    _folders = _folders
+        .map(
+          (folder) => folder.id == folderId
+              ? folder.copyWith(name: trimmed)
+              : folder,
+        )
+        .toList(growable: false);
+    await _store.writeFolders(_folders);
+    notifyListeners();
+  }
+
+  Future<void> deleteFolder(String folderId) async {
+    _folders = _folders
+        .where((folder) => folder.id != folderId)
+        .toList(growable: false);
+    await _store.writeFolders(_folders);
+    notifyListeners();
+  }
+
+  Future<void> moveConversationToFolder(
+    String conversationId,
+    String? folderId,
+  ) async {
+    _folders = _folders.map((folder) {
+      final ids = folder.conversationIds
+          .where((id) => id != conversationId)
+          .toList(growable: true);
+      if (folder.id == folderId) ids.add(conversationId);
+      return folder.copyWith(conversationIds: ids);
+    }).toList(growable: false);
+    await _store.writeFolders(_folders);
+    notifyListeners();
+  }
+
+  void toggleFolder(String folderId) {
+    if (_collapsedFolders.contains(folderId)) {
+      _collapsedFolders.remove(folderId);
+    } else {
+      _collapsedFolders.add(folderId);
+    }
+    notifyListeners();
+  }
+
+  Future<void> _removeFromFolders(String conversationId) async {
+    _folders = _folders
+        .map(
+          (folder) => folder.copyWith(
+            conversationIds: folder.conversationIds
+                .where((id) => id != conversationId)
+                .toList(growable: false),
+          ),
+        )
+        .toList(growable: false);
+    await _store.writeFolders(_folders);
+  }
+
+  void _patchConversation(
+    String conversationId, {
+    String? sandboxStatus,
+    String? executionStatus,
+  }) {
+    final index = _conversations.indexWhere(
+      (item) => item.id == conversationId,
+    );
+    if (index == -1) return;
+    final updated = _conversations[index].copyWith(
+      sandboxStatus: sandboxStatus,
+      executionStatus: executionStatus,
+    );
+    final copy = [..._conversations];
+    copy[index] = updated;
+    _conversations = copy;
+    if (_active?.id == conversationId) _active = updated;
   }
 
   Future<OpenHandsConversation?> createConversation(
@@ -824,6 +1287,7 @@ class OpenHandsProvider extends ChangeNotifier {
           final text = contentToText(
             message is Map ? message['content'] : message,
           );
+          if (role == 'system' || role == 'tool') continue;
           if (text.trim().isEmpty) continue;
           items.add(
             HandoffTimelineItem(
@@ -841,11 +1305,13 @@ class OpenHandsProvider extends ChangeNotifier {
               ? rawAction.cast<String, dynamic>()
               : <String, dynamic>{};
           final detail = describeAction(action);
-          final tool = event.toolName;
+          final tool = _eventToolName(event);
+          if (tool.toLowerCase() == 'think') continue;
+          final summary = (event.raw['summary'] ?? '').toString().trim();
           final item = HandoffTimelineItem(
             id: event.id,
             kind: HandoffItemKind.action,
-            title: _toolLabel(tool),
+            title: summary.isEmpty ? _toolLabel(tool) : summary,
             toolName: tool,
             arguments: action,
             text: detail,
@@ -866,28 +1332,33 @@ class OpenHandsProvider extends ChangeNotifier {
           final key = event.actionId.isNotEmpty
               ? event.actionId
               : event.toolCallId;
-          final index = actionIndex[key];
+          int? index = actionIndex[key];
+          index ??= _lastActionIndex(
+            items,
+            _eventToolName(event),
+            requireEmptyResult: true,
+          );
           if (index != null && index < items.length) {
             final item = items[index];
             item.running = false;
+            item.finishedAt = event.timestamp;
             if (text.trim().isNotEmpty) {
               item.result = item.result.trim().isEmpty
                   ? text.trim()
                   : '${item.result}\n\n${text.trim()}';
-              item.text = item.text.trim().isEmpty
-                  ? text.trim()
-                  : '${item.text}\n\n${text.trim()}';
             }
           } else if (text.trim().isNotEmpty) {
             items.add(
               HandoffTimelineItem(
                 id: event.id,
                 kind: HandoffItemKind.action,
-                title: _toolLabel(event.toolName),
-                toolName: event.toolName,
+                title: _toolLabel(_eventToolName(event)),
+                toolName: _eventToolName(event),
                 result: text.trim(),
                 text: text.trim(),
+                running: false,
                 at: event.timestamp,
+                finishedAt: event.timestamp,
               ),
             );
           }
@@ -929,12 +1400,53 @@ class OpenHandsProvider extends ChangeNotifier {
           break;
       }
     }
+    final busy = _active?.isRunning ?? false;
+    for (final item in items) {
+      if (item.kind == HandoffItemKind.action &&
+          item.running &&
+          (!busy || item.result.trim().isNotEmpty)) {
+        item.running = false;
+      }
+    }
     return items;
+  }
+
+  int? _lastActionIndex(
+    List<HandoffTimelineItem> items,
+    String toolName, {
+    required bool requireEmptyResult,
+  }) {
+    final name = toolName.toLowerCase();
+    for (var i = items.length - 1; i >= 0; i--) {
+      final item = items[i];
+      if (item.kind != HandoffItemKind.action) continue;
+      if (name.isNotEmpty && (item.toolName ?? '').toLowerCase() != name) {
+        continue;
+      }
+      if (requireEmptyResult && item.result.trim().isNotEmpty) continue;
+      return i;
+    }
+    return null;
   }
 
   bool _instantTool(String tool) {
     final name = tool.toLowerCase();
     return name == 'think' || name == 'finish' || name == 'task_tracker';
+  }
+
+  String _eventToolName(OpenHandsEvent event) {
+    final named = event.toolName.trim();
+    if (named.isNotEmpty) return named;
+    final action = event.raw['action'];
+    if (action is! Map) return '';
+    final kind = (action['kind'] ?? '').toString().replaceAll('Action', '');
+    if (kind.isEmpty) return '';
+    return kind
+        .replaceAllMapped(
+          RegExp(r'([a-z0-9])([A-Z])'),
+          (match) => '${match[1]}_${match[2]}',
+        )
+        .toLowerCase();
   }
 
   String _toolLabel(String tool) {
@@ -961,24 +1473,19 @@ class OpenHandsProvider extends ChangeNotifier {
     }
   }
 
-  bool _sameTimeline(List<HandoffTimelineItem> a, List<HandoffTimelineItem> b) {
-    if (a.length != b.length) return false;
-    for (var i = 0; i < a.length; i++) {
-      if (a[i].id != b[i].id ||
-          a[i].text != b[i].text ||
-          a[i].running != b[i].running ||
-          a[i].kind != b[i].kind) {
-        return false;
-      }
-    }
-    return true;
-  }
-
   @override
   void dispose() {
-    _pollTimer?.cancel();
+    _socketGeneration++;
+    _cancelSocket();
     _deviceTimer?.cancel();
     _api.close();
     super.dispose();
   }
+}
+
+class _StreamingSlot {
+  _StreamingSlot({this.startedAt});
+
+  final DateTime? startedAt;
+  String text = '';
 }

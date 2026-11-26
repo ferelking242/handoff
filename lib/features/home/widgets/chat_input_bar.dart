@@ -24,6 +24,7 @@ import 'dart:ui' as ui;
 import 'dart:math' as math;
 import '../../../theme/design_tokens.dart';
 import '../../../icons/lucide_adapter.dart';
+import '../../../icons/broken_icons.dart';
 import '../../../icons/reasoning_icons.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:provider/provider.dart';
@@ -3970,7 +3971,7 @@ class _ChatInputBarState extends State<ChatInputBar>
                     ? widget.reasoningButtonKey
                     : null,
                 tooltip: l10n.chatInputBarMoreTooltip,
-                icon: Lucide.Plus,
+                icon: Broken.add,
                 onTap: () {
                   showDesktopAnchoredMenu(
                     context,
@@ -5184,7 +5185,7 @@ class _ChatInputBarState extends State<ChatInputBar>
                                                       tooltip: AppLocalizations.of(
                                                         context,
                                                       )!.chatInputBarVoiceInputTooltip,
-                                                      icon: Lucide.Mic,
+                                                      icon: Broken.microphone,
                                                       onTap:
                                                           _composerLocked ||
                                                               widget.loading
@@ -5211,7 +5212,7 @@ class _ChatInputBarState extends State<ChatInputBar>
                                                     color: theme
                                                         .colorScheme
                                                         .primary,
-                                                    icon: Lucide.ArrowUp,
+                                                    icon: Broken.arrow_up_2,
                                                     tooltip: widget
                                                         .sendButtonTooltip,
                                                   ),
@@ -5714,12 +5715,11 @@ class _CompactSendButton extends StatelessWidget {
               child: FadeTransition(opacity: anim, child: child),
             ),
             child: loading
-                ? SvgPicture.asset(
+                ? Icon(
+                    Broken.stop_circle,
                     key: const ValueKey('stop'),
-                    'assets/icons/stop.svg',
-                    width: 18,
-                    height: 18,
-                    colorFilter: ColorFilter.mode(fg, BlendMode.srcIn),
+                    size: 18,
+                    color: fg,
                   )
                 : Icon(icon, key: const ValueKey('send'), size: 18, color: fg),
           ),

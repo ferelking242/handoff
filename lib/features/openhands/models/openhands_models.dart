@@ -86,8 +86,22 @@ class OpenHandsConversation {
   final DateTime? updatedAt;
   final double? accumulatedCost;
 
-  bool get isRunning => (executionStatus ?? '').toLowerCase() == 'running';
-  bool get isPaused => (sandboxStatus ?? '').toUpperCase() == 'PAUSED';
+  String get normalizedExecutionStatus =>
+      (executionStatus ?? '').toUpperCase();
+
+  String get normalizedSandboxStatus => (sandboxStatus ?? '').toUpperCase();
+
+  bool get isRunning => normalizedExecutionStatus == 'RUNNING';
+  bool get isPaused => normalizedSandboxStatus == 'PAUSED';
+  bool get isStarting =>
+      normalizedSandboxStatus == 'STARTING' ||
+      normalizedSandboxStatus == 'CREATING' ||
+      normalizedExecutionStatus == 'STARTING';
+  bool get hasError =>
+      normalizedExecutionStatus == 'ERROR' ||
+      normalizedExecutionStatus == 'STUCK' ||
+      normalizedSandboxStatus == 'ERROR';
+  bool get isFinished => normalizedExecutionStatus == 'FINISHED';
   bool get canResume => sandboxId != null && sandboxId!.isNotEmpty;
   bool get canStream => conversationUrl != null && conversationUrl!.isNotEmpty;
 
@@ -187,6 +201,43 @@ class OpenHandsEvent {
   }
 }
 
+/// A user-created folder in the conversation drawer.
+class OpenHandsFolder {
+  const OpenHandsFolder({
+    required this.id,
+    required this.name,
+    this.conversationIds = const [],
+  });
+
+  final String id;
+  final String name;
+  final List<String> conversationIds;
+
+  OpenHandsFolder copyWith({String? name, List<String>? conversationIds}) {
+    return OpenHandsFolder(
+      id: id,
+      name: name ?? this.name,
+      conversationIds: conversationIds ?? this.conversationIds,
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'name': name,
+        'conversation_ids': conversationIds,
+      };
+
+  factory OpenHandsFolder.fromJson(Map<String, dynamic> json) {
+    return OpenHandsFolder(
+      id: (json['id'] ?? '').toString(),
+      name: (json['name'] ?? '').toString(),
+      conversationIds: (json['conversation_ids'] as List? ?? const [])
+          .map((e) => e.toString())
+          .toList(growable: false),
+    );
+  }
+}
+
 /// The kind of row rendered in a conversation timeline.
 enum HandoffItemKind { user, assistant, action, error, notice }
 
@@ -202,6 +253,7 @@ class HandoffTimelineItem {
     this.result = '',
     this.running = false,
     this.at,
+    this.finishedAt,
     this.actionId,
   });
 
@@ -214,9 +266,17 @@ class HandoffTimelineItem {
   String result;
   bool running;
   DateTime? at;
+  DateTime? finishedAt;
   String? actionId;
 
   bool get isTool => kind == HandoffItemKind.action;
+
+  Duration? get duration {
+    final start = at;
+    final end = finishedAt;
+    if (start == null || end == null) return null;
+    return end.difference(start);
+  }
 }
 
 class DeviceCode {

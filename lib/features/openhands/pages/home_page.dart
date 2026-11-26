@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 import 'package:provider/provider.dart';
-import 'package:url_launcher/url_launcher.dart';
 
 import '../../../icons/broken_icons.dart';
 import '../../../shared/animations/widgets.dart';
@@ -140,12 +139,6 @@ class _OpenHandsHomePageState extends State<OpenHandsHomePage> {
     final scheme = Theme.of(context).colorScheme;
     final active = provider.active;
 
-    final status = provider.agentRunning
-        ? 'Agent is working'
-        : active != null
-        ? 'Idle'
-        : 'OpenHands Cloud';
-
     return ChatFrostedBackdrop(
       backdrop: const ChatAssistantBackground(),
       child: Scaffold(
@@ -171,54 +164,29 @@ class _OpenHandsHomePageState extends State<OpenHandsHomePage> {
             onTap: _openDrawer,
           ),
           titleSpacing: 2,
-          title: Row(
+          title: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
             children: [
-              const HandoffLogo(size: 30, radius: 9),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    AnimatedTextSwap(
-                      text: active?.displayTitle ?? 'Handoff',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        fontSize: 16,
-                        fontWeight: AppFontWeights.medium,
-                        color: scheme.onSurface,
-                      ),
-                    ),
-                    const SizedBox(height: 2),
-                    Row(
-                      children: [
-                        Container(
-                          width: 6,
-                          height: 6,
-                          decoration: BoxDecoration(
-                            color: provider.agentRunning
-                                ? scheme.primary
-                                : scheme.onSurface.withValues(alpha: 0.4),
-                            shape: BoxShape.circle,
-                          ),
-                        ),
-                        const SizedBox(width: 5),
-                        Flexible(
-                          child: Text(
-                            status,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                              fontSize: 11,
-                              color: scheme.onSurface.withValues(alpha: 0.6),
-                              fontWeight: AppFontWeights.medium,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
+              AnimatedTextSwap(
+                text: active?.displayTitle ?? 'Handoff',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: 17,
+                  fontWeight: AppFontWeights.semibold,
+                  color: scheme.onSurface,
+                ),
+              ),
+              const SizedBox(height: 1),
+              Text(
+                active?.llmModel ?? provider.activeModel ?? 'OpenHands',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: 11,
+                  color: scheme.onSurfaceVariant,
+                  fontWeight: AppFontWeights.medium,
                 ),
               ),
             ],
@@ -237,40 +205,7 @@ class _OpenHandsHomePageState extends State<OpenHandsHomePage> {
               enabled: !provider.creating,
               onTap: _newConversation,
             ),
-            if (active != null)
-              PopupMenuButton<String>(
-                icon: const Icon(Broken.more, size: 21),
-                onSelected: (value) async {
-                  switch (value) {
-                    case 'refresh':
-                      await provider.refreshTimeline();
-                    case 'web':
-                      final url = active.uiUrl;
-                      if (url != null && url.isNotEmpty) {
-                        await launchUrl(
-                          Uri.parse(url),
-                          mode: LaunchMode.externalApplication,
-                        );
-                      }
-                    case 'close':
-                      provider.closeConversation();
-                  }
-                },
-                itemBuilder: (context) => [
-                  const PopupMenuItem(value: 'refresh', child: Text('Refresh')),
-                  if (active.uiUrl != null)
-                    const PopupMenuItem(
-                      value: 'web',
-                      child: Text('Open in OpenHands'),
-                    ),
-                  const PopupMenuItem(
-                    value: 'close',
-                    child: Text('Close conversation'),
-                  ),
-                ],
-              )
-            else
-              const SizedBox(width: 6),
+            const SizedBox(width: 4),
           ],
         ),
         body: active == null

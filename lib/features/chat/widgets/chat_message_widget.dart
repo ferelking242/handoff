@@ -27,6 +27,7 @@ import 'package:flutter/foundation.dart'
 import 'dart:math' as math;
 import 'package:flutter/services.dart';
 import '../../../core/services/haptics.dart';
+import '../../../icons/broken_icons.dart';
 import '../../../shared/widgets/optional_shader_mask.dart';
 import 'package:provider/provider.dart';
 import 'dart:io';
@@ -574,7 +575,7 @@ IconData? _localToolIconFor(String name, Map<String, dynamic> args) {
       'write' => Lucide.ClipboardPen,
       _ => Lucide.Clipboard,
     },
-    LocalToolNames.textToSpeech => Lucide.Volume2,
+    LocalToolNames.textToSpeech => Broken.volume_high,
     LocalToolNames.calculate => Lucide.Calculator,
     LocalToolNames.screenTime => Lucide.Smartphone,
     LocalToolNames.calendarQuery => Lucide.Calendar,
@@ -694,7 +695,7 @@ Widget _buildTextToSpeechReplayRow(
           padding: const EdgeInsets.all(6),
           color: buttonColor,
           semanticLabel: l10n.ttsFloatingReplayTooltip,
-          builder: (color) => Icon(Lucide.RefreshCw, size: 14, color: color),
+          builder: (color) => Icon(Broken.refresh, size: 14, color: color),
           onTap: () => _replayTextToSpeech(context, text),
         ),
       ),
@@ -1300,6 +1301,7 @@ class ChatMessageWidget extends StatefulWidget {
   final VoidCallback? onResend;
   final VoidCallback? onCopy;
   final VoidCallback? onTranslate;
+  final VoidCallback? onGuard;
   final VoidCallback? onSpeak;
   final VoidCallback? onMore;
   final VoidCallback? onEdit; // user: edit
@@ -1372,6 +1374,7 @@ class ChatMessageWidget extends StatefulWidget {
     this.onResend,
     this.onCopy,
     this.onTranslate,
+    this.onGuard,
     this.onSpeak,
     this.onMore,
     this.onEdit,
@@ -1862,7 +1865,7 @@ class _ChatMessageWidgetState extends State<ChatMessageWidget> {
                             mainAxisSize: MainAxisSize.min,
                             children: [
                               _MenuItem(
-                                icon: Lucide.Copy,
+                                icon: Broken.copy,
                                 label: l10n.shareProviderSheetCopyButton,
                                 onTap: () async {
                                   Navigator.of(ctx).pop();
@@ -2201,7 +2204,7 @@ class _ChatMessageWidgetState extends State<ChatMessageWidget> {
                           child: IosIconButton(
                             size: 16,
                             padding: EdgeInsets.all(4),
-                            icon: Lucide.Copy,
+                            icon: Broken.copy,
                             color: cs.onSurface.withValues(alpha: 0.9),
                             onTap:
                                 widget.onCopy ??
@@ -2217,7 +2220,7 @@ class _ChatMessageWidgetState extends State<ChatMessageWidget> {
                           child: IosIconButton(
                             size: 16,
                             padding: EdgeInsets.all(4),
-                            icon: Lucide.RefreshCw,
+                            icon: Broken.refresh,
                             color: cs.onSurface.withValues(alpha: 0.9),
                             onTap: widget.onResend == null
                                 ? null
@@ -2278,7 +2281,7 @@ class _ChatMessageWidgetState extends State<ChatMessageWidget> {
                             child: IosIconButton(
                               size: 16,
                               padding: EdgeInsets.all(4),
-                              icon: Lucide.Ellipsis,
+                              icon: Broken.more_2,
                               color: cs.onSurface.withValues(alpha: 0.9),
                               onTap: null,
                             ),
@@ -2316,7 +2319,7 @@ class _ChatMessageWidgetState extends State<ChatMessageWidget> {
       globalPosition: globalPosition,
       items: [
         DesktopContextMenuItem(
-          icon: Lucide.Copy,
+          icon: Broken.copy,
           label: l10n.shareProviderSheetCopyButton,
           onTap: () async {
             if (widget.onCopy != null) {
@@ -3973,7 +3976,7 @@ class _ChatMessageWidgetState extends State<ChatMessageWidget> {
                                   child: IosIconButton(
                                     size: 16,
                                     padding: EdgeInsets.all(4),
-                                    icon: Lucide.Copy,
+                                    icon: Broken.copy,
                                     color: cs.onSurface.withValues(alpha: 0.9),
                                     onTap:
                                         widget.onCopy ??
@@ -3991,7 +3994,7 @@ class _ChatMessageWidgetState extends State<ChatMessageWidget> {
                                   child: IosIconButton(
                                     size: 16,
                                     padding: EdgeInsets.all(4),
-                                    icon: Lucide.RefreshCw,
+                                    icon: Broken.refresh,
                                     color: cs.onSurface.withValues(alpha: 0.9),
                                     onTap: widget.onRegenerate == null
                                         ? null
@@ -4029,8 +4032,8 @@ class _ChatMessageWidgetState extends State<ChatMessageWidget> {
                                               ),
                                           child: Icon(
                                             ttsActive
-                                                ? Lucide.CircleStop
-                                                : Lucide.Volume2,
+                                                ? Broken.stop_circle
+                                                : Broken.volume_high,
                                             key: ValueKey(
                                               ttsActive ? 'stop' : 'speak',
                                             ),
@@ -4047,48 +4050,61 @@ class _ChatMessageWidgetState extends State<ChatMessageWidget> {
                                 width: 28,
                                 height: 28,
                                 child: Center(
-                                  child: GestureDetector(
-                                    key: _translateBtnKey2,
-                                    behavior: HitTestBehavior.opaque,
-                                    onTapDown: (d) {
-                                      final isDesktop =
-                                          defaultTargetPlatform ==
-                                              TargetPlatform.macOS ||
-                                          defaultTargetPlatform ==
-                                              TargetPlatform.windows ||
-                                          defaultTargetPlatform ==
-                                              TargetPlatform.linux;
-                                      if (isDesktop) {
-                                        try {
-                                          DesktopMenuAnchor.setPosition(
-                                            d.globalPosition,
-                                          );
-                                        } catch (_) {}
-                                      }
-                                    },
-                                    onTap: () {
-                                      final isDesktop =
-                                          defaultTargetPlatform ==
-                                              TargetPlatform.macOS ||
-                                          defaultTargetPlatform ==
-                                              TargetPlatform.windows ||
-                                          defaultTargetPlatform ==
-                                              TargetPlatform.linux;
-                                      if (isDesktop) {
-                                        _setAnchorFromKey(_translateBtnKey2);
-                                      }
-                                      widget.onTranslate?.call();
-                                    },
-                                    child: IosIconButton(
-                                      size: 16,
-                                      padding: EdgeInsets.all(4),
-                                      icon: Lucide.Languages,
-                                      color: cs.onSurface.withValues(
-                                        alpha: 0.9,
-                                      ),
-                                      onTap: null,
-                                    ),
-                                  ),
+                                  child: widget.onGuard != null
+                                      ? IosIconButton(
+                                          size: 16,
+                                          padding: const EdgeInsets.all(4),
+                                          icon: Broken.shield_tick,
+                                          color: cs.onSurface.withValues(
+                                            alpha: 0.9,
+                                          ),
+                                          tooltip: 'OpenHands Guard',
+                                          onTap: widget.onGuard,
+                                        )
+                                      : GestureDetector(
+                                          key: _translateBtnKey2,
+                                          behavior: HitTestBehavior.opaque,
+                                          onTapDown: (d) {
+                                            final isDesktop =
+                                                defaultTargetPlatform ==
+                                                    TargetPlatform.macOS ||
+                                                defaultTargetPlatform ==
+                                                    TargetPlatform.windows ||
+                                                defaultTargetPlatform ==
+                                                    TargetPlatform.linux;
+                                            if (isDesktop) {
+                                              try {
+                                                DesktopMenuAnchor.setPosition(
+                                                  d.globalPosition,
+                                                );
+                                              } catch (_) {}
+                                            }
+                                          },
+                                          onTap: () {
+                                            final isDesktop =
+                                                defaultTargetPlatform ==
+                                                    TargetPlatform.macOS ||
+                                                defaultTargetPlatform ==
+                                                    TargetPlatform.windows ||
+                                                defaultTargetPlatform ==
+                                                    TargetPlatform.linux;
+                                            if (isDesktop) {
+                                              _setAnchorFromKey(
+                                                _translateBtnKey2,
+                                              );
+                                            }
+                                            widget.onTranslate?.call();
+                                          },
+                                          child: IosIconButton(
+                                            size: 16,
+                                            padding: const EdgeInsets.all(4),
+                                            icon: Lucide.Languages,
+                                            color: cs.onSurface.withValues(
+                                              alpha: 0.9,
+                                            ),
+                                            onTap: null,
+                                          ),
+                                        ),
                                 ),
                               ),
                               SizedBox(
@@ -4129,7 +4145,7 @@ class _ChatMessageWidgetState extends State<ChatMessageWidget> {
                                     child: IosIconButton(
                                       size: 16,
                                       padding: EdgeInsets.all(4),
-                                      icon: Lucide.Ellipsis,
+                                      icon: Broken.more_2,
                                       color: cs.onSurface.withValues(
                                         alpha: 0.9,
                                       ),
@@ -6433,7 +6449,7 @@ class _ChainOfThoughtBrowserGroupState
             child: _TimelineStepShell(
               isFirst: false,
               isLast: false,
-              icon: Icon(Lucide.Ellipsis, size: 16, color: fg.muted),
+              icon: Icon(Broken.more_2, size: 16, color: fg.muted),
               label: Text(
                 l.browserStepsShowEarlier(firstVisible),
                 style: TextStyle(fontSize: 13, color: fg.muted),

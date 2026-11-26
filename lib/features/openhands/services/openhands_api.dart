@@ -141,6 +141,21 @@ class OpenHandsApi {
     return _decode(response);
   }
 
+  Future<Map<String, dynamic>> _deleteJson(
+    Uri uri, {
+    Map<String, String>? headers,
+  }) async {
+    final response = await _client.delete(
+      uri,
+      headers: {
+        'Accept': 'application/json',
+        ..._clientHeaders,
+        ...?headers,
+      },
+    );
+    return _decode(response);
+  }
+
   Map<String, dynamic> _decode(http.Response response) {
     final raw = response.body.trim();
     Map<String, dynamic> data = const {};
@@ -330,6 +345,24 @@ class OpenHandsApi {
     );
   }
 
+  /// Stops the runtime that owns the conversation.
+  Future<void> pauseSandbox(String sandboxId) async {
+    final id = Uri.encodeComponent(sandboxId);
+    await _postJson(
+      _uri('/api/v1/sandboxes/$id/pause'),
+      const <String, dynamic>{},
+      headers: _authHeaders,
+    );
+  }
+
+  Future<void> deleteConversation(String conversationId) async {
+    final id = Uri.encodeComponent(conversationId);
+    await _deleteJson(
+      _uri('/api/v1/app-conversations/$id'),
+      headers: _authHeaders,
+    );
+  }
+
   /// Starts a new app conversation and waits for its sandbox to be ready.
   Future<OpenHandsConversation> createConversation({
     required String message,
@@ -414,6 +447,27 @@ class OpenHandsApi {
       base = base.substring(0, base.length - 1);
     }
     return base;
+  }
+
+  /// `/sockets/session/{id}` is the durable + streaming event socket.
+  Uri sessionSocketUri(
+    OpenHandsConversation conversation, {
+    required int afterSeq,
+  }) {
+    final base = Uri.parse(_conversationBase(conversation));
+    var path = base.path;
+    final marker = path.indexOf('/api/conversations');
+    if (marker >= 0) path = path.substring(0, marker);
+    while (path.endsWith('/')) {
+      path = path.substring(0, path.length - 1);
+    }
+    final socketPath =
+        '$path/sockets/session/${Uri.encodeComponent(conversation.id)}';
+    return base.replace(
+      scheme: base.scheme == 'https' ? 'wss' : 'ws',
+      path: socketPath,
+      queryParameters: {'after_seq': '$afterSeq'},
+    );
   }
 
   Future<EventPage> searchEvents(

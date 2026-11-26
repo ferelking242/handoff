@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -18,6 +20,8 @@ class OpenHandsStore {
   static const String baseUrlKey = 'handoff.openhands.base_url';
   static const String guardUrlKey = 'handoff.guard.url';
   static const String guardKeyKey = 'handoff.guard.key';
+  static const String foldersKey = 'handoff.openhands.folders';
+  static const String archivedKey = 'handoff.openhands.archived';
 
   final FlutterSecureStorage _secureStorage;
   SharedPreferences? _prefs;
@@ -108,5 +112,42 @@ class OpenHandsStore {
     } else {
       await prefs.setString(guardKeyKey, key);
     }
+  }
+
+  Future<List<OpenHandsFolder>> readFolders() async {
+    final prefs = await _preferences;
+    final raw = prefs.getString(foldersKey);
+    if (raw == null || raw.trim().isEmpty) return const [];
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! List) return const [];
+      return decoded
+          .whereType<Map>()
+          .map((e) => OpenHandsFolder.fromJson(e.cast<String, dynamic>()))
+          .where((folder) => folder.id.isNotEmpty)
+          .toList(growable: false);
+    } catch (error) {
+      debugPrint('OpenHandsStore: folder read failed: $error');
+      return const [];
+    }
+  }
+
+  Future<void> writeFolders(List<OpenHandsFolder> folders) async {
+    final prefs = await _preferences;
+    await prefs.setString(
+      foldersKey,
+      jsonEncode(folders.map((folder) => folder.toJson()).toList()),
+    );
+  }
+
+  Future<Set<String>> readArchivedIds() async {
+    final prefs = await _preferences;
+    final raw = prefs.getStringList(archivedKey);
+    return raw?.where((id) => id.isNotEmpty).toSet() ?? <String>{};
+  }
+
+  Future<void> writeArchivedIds(Set<String> ids) async {
+    final prefs = await _preferences;
+    await prefs.setStringList(archivedKey, ids.toList(growable: false));
   }
 }
