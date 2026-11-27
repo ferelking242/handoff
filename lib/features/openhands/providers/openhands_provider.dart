@@ -13,6 +13,8 @@ import '../services/openhands_store.dart';
 
 enum OpenHandsAuthStatus { loading, signedOut, signingIn, signedIn, error }
 
+enum OpenHandsSendOutcome { sent, queued, rejected }
+
 /// Owns the OpenHands session, the conversation list and the open timeline.
 class OpenHandsProvider extends ChangeNotifier {
   OpenHandsProvider({
@@ -98,6 +100,9 @@ class OpenHandsProvider extends ChangeNotifier {
   final List<OpenHandsEvent> _events = [];
   final Map<String, _StreamingSlot> _streaming = {};
   final List<HandoffTimelineItem> _optimistic = [];
+  final Map<String, List<QueuedPrompt>> _queuedPrompts = {};
+  bool _queuePaused = false;
+  bool _drainingQueue = false;
 
   List<OpenHandsFolder> _folders = const [];
   List<OpenHandsFolder> get folders => _folders;
@@ -112,6 +117,14 @@ class OpenHandsProvider extends ChangeNotifier {
   bool get isSignedIn => _authStatus == OpenHandsAuthStatus.signedIn;
 
   bool get agentRunning => _streaming.isNotEmpty || (_active?.isRunning ?? false);
+
+  List<QueuedPrompt> get queuedPrompts {
+    final id = _active?.id;
+    if (id == null) return const <QueuedPrompt>[];
+    return List<QueuedPrompt>.unmodifiable(_queuedPrompts[id] ?? const []);
+  }
+
+  bool get queuePaused => _queuePaused;
 
   List<OpenHandsConversation> get visibleConversations => _conversations
       .where((conversation) => !_archivedIds.contains(conversation.id))
@@ -471,6 +484,7 @@ class OpenHandsProvider extends ChangeNotifier {
         if (generation != _socketGeneration) return;
       }
       _connectSocket(fresh, generation);
+      unawaited(_drainQueue());
     } catch (error) {
       if (generation != _socketGeneration) return;
       if (_isAuthError(error)) {
@@ -662,6 +676,7 @@ class OpenHandsProvider extends ChangeNotifier {
         _removeOptimisticFor(event);
         _rebuildTimeline();
         notifyListeners();
+        unawaited(_drainQueue());
       case 'transient':
         final rawEvent = frame['event'];
         if (rawEvent is Map) {
@@ -681,12 +696,15 @@ class OpenHandsProvider extends ChangeNotifier {
         final id = (frame['item_id'] ?? '').toString();
         final content = (frame['content'] ?? '').toString();
         if (id.isEmpty || content.isEmpty) return;
-        if ((frame['kind'] ?? 'text').toString() == 'reasoning') return;
         final slot = _streaming.putIfAbsent(
           id,
           () => _StreamingSlot(startedAt: DateTime.now()),
         );
-        slot.text += content;
+        if ((frame['kind'] ?? 'text').toString() == 'reasoning') {
+          slot.reasoning += content;
+        } else {
+          slot.text += content;
+        }
         _rebuildTimeline();
         notifyListeners();
       case 'item_aborted':
@@ -733,6 +751,9 @@ class OpenHandsProvider extends ChangeNotifier {
     if (key == null || value == null || value.isEmpty) return;
     if (key == 'execution_status') {
       _active = _active?.copyWith(executionStatus: value);
+      if (value.toUpperCase() != 'RUNNING') {
+        unawaited(_drainQueue());
+      }
     } else if (key == 'sandbox_status') {
       _active = _active?.copyWith(sandboxStatus: value);
     }
@@ -755,6 +776,17 @@ class OpenHandsProvider extends ChangeNotifier {
   void _rebuildTimeline() {
     final mapped = _mapEvents(_events);
     for (final entry in _streaming.entries) {
+      if (entry.value.reasoning.trim().isNotEmpty) {
+        mapped.add(
+          HandoffTimelineItem(
+            id: 'stream-think:${entry.key}',
+            kind: HandoffItemKind.thinking,
+            text: entry.value.reasoning.trim(),
+            running: true,
+            at: entry.value.startedAt,
+          ),
+        );
+      }
       if (entry.value.text.trim().isEmpty) continue;
       mapped.add(
         HandoffTimelineItem(
@@ -827,11 +859,31 @@ class OpenHandsProvider extends ChangeNotifier {
   // Sending and conversation actions
   // ---------------------------------------------------------------------
 
-  Future<bool> sendMessage(String text) async {
+  Future<bool> sendMessage(String text) async =>
+      await submitMessage(text) != OpenHandsSendOutcome.rejected;
+
+  Future<OpenHandsSendOutcome> submitMessage(String text) async {
     final current = _active;
     final trimmed = text.trim();
-    if (current == null || trimmed.isEmpty || _sending) return false;
+    if (current == null || trimmed.isEmpty) {
+      return OpenHandsSendOutcome.rejected;
+    }
 
+    final queue = _queueFor(current.id);
+    if (_sending || agentRunning || queue.isNotEmpty) {
+      _enqueuePrompt(current.id, trimmed);
+      if (!_sending && !agentRunning) unawaited(_drainQueue());
+      return OpenHandsSendOutcome.queued;
+    }
+
+    final sent = await _deliverMessage(current, trimmed);
+    return sent ? OpenHandsSendOutcome.sent : OpenHandsSendOutcome.rejected;
+  }
+
+  Future<bool> _deliverMessage(
+    OpenHandsConversation current,
+    String trimmed,
+  ) async {
     _sending = true;
     final optimistic = HandoffTimelineItem(
       id: 'local-${DateTime.now().microsecondsSinceEpoch}',
@@ -880,12 +932,116 @@ class OpenHandsProvider extends ChangeNotifier {
     }
   }
 
+  List<QueuedPrompt> _queueFor(String conversationId) =>
+      _queuedPrompts.putIfAbsent(conversationId, () => <QueuedPrompt>[]);
+
+  void _enqueuePrompt(String conversationId, String text) {
+    _queueFor(conversationId).add(
+      QueuedPrompt(
+        id: 'queued-${DateTime.now().microsecondsSinceEpoch}',
+        text: text,
+        createdAt: DateTime.now(),
+      ),
+    );
+    _queuePaused = false;
+    notifyListeners();
+  }
+
+  void removeQueuedPrompt(String id) {
+    final conversationId = _active?.id;
+    if (conversationId == null) return;
+    _queuedPrompts[conversationId]?.removeWhere((prompt) => prompt.id == id);
+    notifyListeners();
+  }
+
+  void updateQueuedPrompt(String id, String text) {
+    final trimmed = text.trim();
+    final conversationId = _active?.id;
+    if (conversationId == null || trimmed.isEmpty) return;
+    final queue = _queuedPrompts[conversationId];
+    if (queue == null) return;
+    final index = queue.indexWhere((prompt) => prompt.id == id);
+    if (index == -1) return;
+    queue[index] = queue[index].copyWith(text: trimmed);
+    notifyListeners();
+  }
+
+  void moveQueuedPrompt(String id, int offset) {
+    final conversationId = _active?.id;
+    if (conversationId == null) return;
+    final queue = _queuedPrompts[conversationId];
+    if (queue == null) return;
+    final index = queue.indexWhere((prompt) => prompt.id == id);
+    if (index == -1) return;
+    final target = (index + offset).clamp(0, queue.length - 1);
+    if (target == index) return;
+    final prompt = queue.removeAt(index);
+    queue.insert(target, prompt);
+    notifyListeners();
+  }
+
+  void setQueuePaused(bool paused) {
+    _queuePaused = paused;
+    notifyListeners();
+    if (!paused) unawaited(_drainQueue());
+  }
+
+  void clearQueuedPrompts() {
+    final conversationId = _active?.id;
+    if (conversationId == null) return;
+    _queuedPrompts[conversationId]?.clear();
+    _queuePaused = false;
+    notifyListeners();
+  }
+
+  Future<void> sendQueuedPromptNow(String id) async {
+    final conversationId = _active?.id;
+    if (conversationId == null) return;
+    final queue = _queuedPrompts[conversationId];
+    if (queue == null) return;
+    final index = queue.indexWhere((prompt) => prompt.id == id);
+    if (index == -1) return;
+    final prompt = queue.removeAt(index);
+    queue.insert(0, prompt);
+    _queuePaused = false;
+    notifyListeners();
+    await _drainQueue();
+  }
+
+  Future<void> _drainQueue() async {
+    final current = _active;
+    if (current == null ||
+        _queuePaused ||
+        _sending ||
+        _drainingQueue ||
+        agentRunning) {
+      return;
+    }
+    final queue = _queuedPrompts[current.id];
+    if (queue == null || queue.isEmpty) return;
+
+    _drainingQueue = true;
+    final next = queue.first;
+    try {
+      final sent = await _deliverMessage(current, next.text);
+      if (sent) {
+        queue.removeWhere((prompt) => prompt.id == next.id);
+      } else {
+        _queuePaused = true;
+      }
+    } finally {
+      _drainingQueue = false;
+      notifyListeners();
+    }
+  }
+
   Future<void> stopAgent() async {
     final current = _active;
     if (current == null) return;
     try {
       await _api.interruptConversation(current);
       _active = _active?.copyWith(executionStatus: 'IDLE');
+      _queuePaused = true;
       _streaming.clear();
       _rebuildTimeline();
       notifyListeners();
@@ -967,6 +1123,7 @@ class OpenHandsProvider extends ChangeNotifier {
         .where((item) => item.id != conversation.id)
         .toList(growable: false);
     _archivedIds = {..._archivedIds}..remove(conversation.id);
+    _queuedPrompts.remove(conversation.id);
     await _store.writeArchivedIds(_archivedIds);
     await _cache.delete(conversation.id);
     await _removeFromFolders(conversation.id);
@@ -1276,6 +1433,7 @@ class OpenHandsProvider extends ChangeNotifier {
   List<HandoffTimelineItem> _mapEvents(List<OpenHandsEvent> events) {
     final items = <HandoffTimelineItem>[];
     final actionIndex = <String, int>{};
+    final skippedActions = <String>{};
 
     for (final event in events) {
       switch (event.kind) {
@@ -1284,10 +1442,35 @@ class OpenHandsProvider extends ChangeNotifier {
           final role = message is Map
               ? (message['role'] ?? event.source).toString()
               : event.source;
-          final text = contentToText(
+          var text = contentToText(
             message is Map ? message['content'] : message,
           );
           if (role == 'system' || role == 'tool') continue;
+          var reasoning = role == 'assistant'
+              ? reasoningToText(
+                  message is Map
+                      ? message.cast<String, dynamic>()
+                      : null,
+                )
+              : '';
+          if (role == 'assistant' && reasoning.isEmpty) {
+            reasoning = reasoningToText(event.raw);
+          }
+          final split = splitInlineThink(text);
+          if (role == 'assistant' && split.reasoning.isNotEmpty) {
+            if (reasoning.isEmpty) reasoning = split.reasoning;
+            text = split.content;
+          }
+          if (reasoning.isNotEmpty) {
+            items.add(
+              HandoffTimelineItem(
+                id: 'reason:${event.id}',
+                kind: HandoffItemKind.thinking,
+                text: reasoning,
+                at: event.timestamp,
+              ),
+            );
+          }
           if (text.trim().isEmpty) continue;
           items.add(
             HandoffTimelineItem(
@@ -1306,7 +1489,68 @@ class OpenHandsProvider extends ChangeNotifier {
               : <String, dynamic>{};
           final detail = describeAction(action);
           final tool = _eventToolName(event);
-          if (tool.toLowerCase() == 'think') continue;
+          final toolKey = tool.toLowerCase();
+
+          if (toolKey == 'think') {
+            final direct = (action['thought'] ?? '').toString().trim();
+            final reasoning =
+                direct.isNotEmpty ? direct : reasoningToText(event.raw);
+            if (reasoning.isNotEmpty) {
+              items.add(
+                HandoffTimelineItem(
+                  id: event.id,
+                  kind: HandoffItemKind.thinking,
+                  text: reasoning,
+                  at: event.timestamp,
+                  finishedAt: event.timestamp,
+                ),
+              );
+            }
+            skippedActions.add(event.id);
+            if (event.toolCallId.isNotEmpty) {
+              skippedActions.add(event.toolCallId);
+            }
+            continue;
+          }
+
+          final reasoning = reasoningToText(event.raw);
+          if (reasoning.isNotEmpty) {
+            items.add(
+              HandoffTimelineItem(
+                id: 'reason:${event.id}',
+                kind: HandoffItemKind.thinking,
+                text: reasoning,
+                at: event.timestamp,
+                finishedAt: event.timestamp,
+              ),
+            );
+          }
+
+          if (toolKey == 'finish') {
+            final message = (action['message'] ??
+                    action['final_message'] ??
+                    event.raw['message'] ??
+                    '')
+                .toString()
+                .trim();
+            if (message.isNotEmpty) {
+              items.add(
+                HandoffTimelineItem(
+                  id: event.id,
+                  kind: HandoffItemKind.assistant,
+                  text: message,
+                  at: event.timestamp,
+                  finishedAt: event.timestamp,
+                ),
+              );
+            }
+            skippedActions.add(event.id);
+            if (event.toolCallId.isNotEmpty) {
+              skippedActions.add(event.toolCallId);
+            }
+            continue;
+          }
+
           final summary = (event.raw['summary'] ?? '').toString().trim();
           final item = HandoffTimelineItem(
             id: event.id,
@@ -1332,6 +1576,7 @@ class OpenHandsProvider extends ChangeNotifier {
           final key = event.actionId.isNotEmpty
               ? event.actionId
               : event.toolCallId;
+          if (skippedActions.contains(key)) continue;
           int? index = actionIndex[key];
           index ??= _lastActionIndex(
             items,
@@ -1473,6 +1718,15 @@ class OpenHandsProvider extends ChangeNotifier {
     }
   }
 
+  @visibleForTesting
+  void debugSetActive(OpenHandsConversation conversation) {
+    _active = conversation;
+  }
+
+  @visibleForTesting
+  List<HandoffTimelineItem> debugMapEvents(List<OpenHandsEvent> events) =>
+      _mapEvents(events);
+
   @override
   void dispose() {
     _socketGeneration++;
@@ -1488,4 +1742,5 @@ class _StreamingSlot {
 
   final DateTime? startedAt;
   String text = '';
+  String reasoning = '';
 }

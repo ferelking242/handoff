@@ -766,6 +766,8 @@ class ChatInputBar extends StatefulWidget {
     this.learningModeActive = false,
     this.worldBookActive = false,
     this.showMoreButton = true,
+    this.showSearchButton = true,
+    this.showVoiceButton = true,
     this.showQuickPhraseButton = false,
     this.onQuickPhrase,
     this.onLongPressQuickPhrase,
@@ -838,6 +840,8 @@ class ChatInputBar extends StatefulWidget {
   final bool learningModeActive;
   final bool worldBookActive;
   final bool showMoreButton;
+  final bool showSearchButton;
+  final bool showVoiceButton;
   final bool showQuickPhraseButton;
   final VoidCallback? onQuickPhrase;
   final VoidCallback? onLongPressQuickPhrase;
@@ -3426,91 +3430,93 @@ class _ChatInputBarState extends State<ChatInputBar>
           return BrandAssets.assetForName(svc.name);
         })();
 
-        // Search button
-        actions.add(
-          _OverflowAction(
-            width: normalButtonW,
-            builder: () {
-              // Not enabled at all -> default globe
-              if (!appSearchEnabled && !builtinSearchActive) {
+        if (widget.showSearchButton) {
+          // Search button
+          actions.add(
+            _OverflowAction(
+              width: normalButtonW,
+              builder: () {
+                  // Not enabled at all -> default globe
+                if (!appSearchEnabled && !builtinSearchActive) {
+                  return _CompactIconButton(
+                    tooltip: l10n.chatInputBarOnlineSearchTooltip,
+                    icon: Lucide.Globe,
+                    active: false,
+                    onTap: lockTap(widget.onOpenSearch),
+                  );
+                }
+                // Built-in search -> magnifier icon in theme color
+                if (builtinSearchActive) {
+                  return _CompactIconButton(
+                    tooltip: l10n.chatInputBarOnlineSearchTooltip,
+                    icon: Lucide.Search,
+                    active: true,
+                    onTap: lockTap(widget.onOpenSearch),
+                  );
+                }
+                // External provider search -> brand icon
                 return _CompactIconButton(
                   tooltip: l10n.chatInputBarOnlineSearchTooltip,
                   icon: Lucide.Globe,
-                  active: false,
-                  onTap: lockTap(widget.onOpenSearch),
-                );
-              }
-              // Built-in search -> magnifier icon in theme color
-              if (builtinSearchActive) {
-                return _CompactIconButton(
-                  tooltip: l10n.chatInputBarOnlineSearchTooltip,
-                  icon: Lucide.Search,
                   active: true,
                   onTap: lockTap(widget.onOpenSearch),
-                );
-              }
-              // External provider search -> brand icon
-              return _CompactIconButton(
-                tooltip: l10n.chatInputBarOnlineSearchTooltip,
-                icon: Lucide.Globe,
-                active: true,
-                onTap: lockTap(widget.onOpenSearch),
-                childBuilder: (c) {
-                  final asset = brandAsset;
-                  if (asset != null) {
-                    if (asset.endsWith('.svg')) {
-                      return SvgPicture.asset(
-                        asset,
-                        width: 20,
-                        height: 20,
-                        colorFilter: ColorFilter.mode(c, BlendMode.srcIn),
-                      );
+                  childBuilder: (c) {
+                    final asset = brandAsset;
+                    if (asset != null) {
+                      if (asset.endsWith('.svg')) {
+                        return SvgPicture.asset(
+                          asset,
+                          width: 20,
+                          height: 20,
+                          colorFilter: ColorFilter.mode(c, BlendMode.srcIn),
+                        );
+                      } else {
+                        return Image.asset(
+                          asset,
+                          width: 20,
+                          height: 20,
+                          color: c,
+                          colorBlendMode: BlendMode.srcIn,
+                        );
+                      }
                     } else {
-                      return Image.asset(
-                        asset,
-                        width: 20,
-                        height: 20,
-                        color: c,
-                        colorBlendMode: BlendMode.srcIn,
-                      );
+                      return Icon(Lucide.Globe, size: 20, color: c);
                     }
-                  } else {
-                    return Icon(Lucide.Globe, size: 20, color: c);
-                  }
-                },
-              );
-            },
-            menu: () {
-              // Prefer vector icon if brandAsset is svg, otherwise pick reasonable default
-              if (!appSearchEnabled && !builtinSearchActive) {
+                  },
+                );
+              },
+              menu: () {
+                // Prefer vector icon if brandAsset is svg, otherwise pick reasonable default
+                if (!appSearchEnabled && !builtinSearchActive) {
+                  return DesktopContextMenuItem(
+                    icon: Lucide.Globe,
+                    label: l10n.chatInputBarOnlineSearchTooltip,
+                    onTap: lockTap(widget.onOpenSearch),
+                  );
+                }
+                if (builtinSearchActive) {
+                  return DesktopContextMenuItem(
+                    icon: Lucide.Search,
+                    label: l10n.chatInputBarOnlineSearchTooltip,
+                    onTap: lockTap(widget.onOpenSearch),
+                  );
+                }
+                if (brandAsset != null && brandAsset.endsWith('.svg')) {
+                  return DesktopContextMenuItem(
+                    svgAsset: brandAsset,
+                    label: l10n.chatInputBarOnlineSearchTooltip,
+                    onTap: lockTap(widget.onOpenSearch),
+                  );
+                }
                 return DesktopContextMenuItem(
                   icon: Lucide.Globe,
                   label: l10n.chatInputBarOnlineSearchTooltip,
                   onTap: lockTap(widget.onOpenSearch),
                 );
-              }
-              if (builtinSearchActive) {
-                return DesktopContextMenuItem(
-                  icon: Lucide.Search,
-                  label: l10n.chatInputBarOnlineSearchTooltip,
-                  onTap: lockTap(widget.onOpenSearch),
-                );
-              }
-              if (brandAsset != null && brandAsset.endsWith('.svg')) {
-                return DesktopContextMenuItem(
-                  svgAsset: brandAsset,
-                  label: l10n.chatInputBarOnlineSearchTooltip,
-                  onTap: lockTap(widget.onOpenSearch),
-                );
-              }
-              return DesktopContextMenuItem(
-                icon: Lucide.Globe,
-                label: l10n.chatInputBarOnlineSearchTooltip,
-                onTap: lockTap(widget.onOpenSearch),
-              );
-            }(),
-          ),
-        );
+              }(),
+            ),
+          );
+        }
 
         if (widget.supportsReasoning || widget.showResponseSpeedAction) {
           final reasoning = widget.supportsReasoning;
@@ -4594,6 +4600,7 @@ class _ChatInputBarState extends State<ChatInputBar>
     final selectedAsrService = settings.selectedAsrService;
     final asr = widget.asrProvider;
     final showVoiceInput =
+        widget.showVoiceButton &&
         asr != null &&
         !asr.isActive &&
         ((selectedAsrService != null && asr.canUse(selectedAsrService)) ||
@@ -5671,7 +5678,7 @@ class _ContextUsageInputControl extends StatelessWidget {
 }
 
 // New compact send button for the integrated input bar
-class _CompactSendButton extends StatelessWidget {
+class _CompactSendButton extends StatefulWidget {
   const _CompactSendButton({
     required this.enabled,
     required this.onSend,
@@ -5691,12 +5698,51 @@ class _CompactSendButton extends StatelessWidget {
   final String? tooltip;
 
   @override
+  State<_CompactSendButton> createState() => _CompactSendButtonState();
+}
+
+class _CompactSendButtonState extends State<_CompactSendButton>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _pulse;
+
+  @override
+  void initState() {
+    super.initState();
+    _pulse = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 900),
+    );
+    _syncPulse();
+  }
+
+  @override
+  void didUpdateWidget(covariant _CompactSendButton oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.loading != widget.loading) _syncPulse();
+  }
+
+  void _syncPulse() {
+    if (widget.loading) {
+      _pulse.repeat(reverse: true);
+    } else {
+      _pulse.stop();
+      _pulse.value = 0;
+    }
+  }
+
+  @override
+  void dispose() {
+    _pulse.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    final bg = (enabled || loading)
-        ? color
+    final bg = (widget.enabled || widget.loading)
+        ? widget.color
         : cs.onSurface.withValues(alpha: 0.12);
-    final fg = (enabled || loading)
+    final fg = (widget.enabled || widget.loading)
         ? cs.onPrimary
         : cs.onSurface.withValues(alpha: 0.38);
 
@@ -5705,7 +5751,9 @@ class _CompactSendButton extends StatelessWidget {
       shape: const CircleBorder(),
       child: InkWell(
         customBorder: const CircleBorder(),
-        onTap: loading ? onStop : (enabled ? onSend : null),
+        onTap: widget.loading
+            ? widget.onStop
+            : (widget.enabled ? widget.onSend : null),
         child: Padding(
           padding: const EdgeInsets.all(7),
           child: AnimatedSwitcher(
@@ -5714,23 +5762,35 @@ class _CompactSendButton extends StatelessWidget {
               scale: anim,
               child: FadeTransition(opacity: anim, child: child),
             ),
-            child: loading
+            child: widget.loading
                 ? Icon(
                     Broken.stop_circle,
                     key: const ValueKey('stop'),
                     size: 18,
                     color: fg,
                   )
-                : Icon(icon, key: const ValueKey('send'), size: 18, color: fg),
+                : Icon(
+                    widget.icon,
+                    key: const ValueKey('send'),
+                    size: 18,
+                    color: fg,
+                  ),
           ),
         ),
       ),
     );
-    if (tooltip == null) return button;
+
+    final scale = widget.loading
+        ? Tween<double>(begin: 0.9, end: 1.08).animate(
+            CurvedAnimation(parent: _pulse, curve: Curves.easeInOut),
+          )
+        : const AlwaysStoppedAnimation<double>(1);
+    final animated = ScaleTransition(scale: scale, child: button);
+    if (widget.tooltip == null) return animated;
     return Tooltip(
-      message: tooltip!,
+      message: widget.tooltip!,
       waitDuration: const Duration(milliseconds: 350),
-      child: Semantics(tooltip: tooltip!, child: button),
+      child: Semantics(tooltip: widget.tooltip!, child: animated),
     );
   }
 }

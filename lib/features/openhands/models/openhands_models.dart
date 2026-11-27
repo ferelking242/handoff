@@ -239,7 +239,7 @@ class OpenHandsFolder {
 }
 
 /// The kind of row rendered in a conversation timeline.
-enum HandoffItemKind { user, assistant, action, error, notice }
+enum HandoffItemKind { user, assistant, thinking, action, error, notice }
 
 /// A display row derived from one or more OpenHands events.
 class HandoffTimelineItem {
@@ -277,6 +277,101 @@ class HandoffTimelineItem {
     if (start == null || end == null) return null;
     return end.difference(start);
   }
+}
+
+/// A prompt waiting for the agent to finish its current turn.
+class QueuedPrompt {
+  const QueuedPrompt({
+    required this.id,
+    required this.text,
+    required this.createdAt,
+  });
+
+  final String id;
+  final String text;
+  final DateTime createdAt;
+
+  QueuedPrompt copyWith({String? text}) => QueuedPrompt(
+    id: id,
+    text: text ?? this.text,
+    createdAt: createdAt,
+  );
+}
+
+/// Reads provider reasoning from an ActionEvent, MessageEvent or llm_message.
+String reasoningToText(Map<String, dynamic>? payload) {
+  if (payload == null) return '';
+  final direct = payload['reasoning_content'];
+  if (direct is String && direct.trim().isNotEmpty) return direct.trim();
+
+  final reasoning = payload['reasoning'];
+  if (reasoning is String && reasoning.trim().isNotEmpty) {
+    return reasoning.trim();
+  }
+
+  final blocks = payload['thinking_blocks'];
+  if (blocks is List) {
+    final text = blocks
+        .whereType<Map>()
+        .where((block) => block['type'] == 'thinking')
+        .map((block) => block['thinking']?.toString() ?? '')
+        .where((value) => value.trim().isNotEmpty)
+        .join('\n\n');
+    if (text.isNotEmpty) return text.trim();
+  }
+
+  final thought = payload['thought'];
+  if (thought is List) {
+    final text = contentToText(thought);
+    if (text.trim().isNotEmpty) return _stripThinkPrefix(text.trim());
+  } else if (thought is String) {
+    final text = _stripThinkPrefix(thought.trim());
+    if (text.isNotEmpty) return text;
+  }
+  return '';
+}
+
+/// OpenHands stores a ThinkAction's payload both as `think: {...}` in the
+/// event thought and as clean text in the action itself.
+String _stripThinkPrefix(String text) {
+  if (!text.startsWith('think:')) return text;
+  final body = text.substring('think:'.length).trim();
+  try {
+    final decoded = jsonDecode(body);
+    if (decoded is Map) {
+      final value = decoded['thought'];
+      if (value is String) return value.trim();
+    }
+  } catch (_) {
+    // Not every provider writes JSON here.
+  }
+  return body;
+}
+
+class InlineThinkSplit {
+  const InlineThinkSplit({required this.reasoning, required this.content});
+
+  final String reasoning;
+  final String content;
+}
+
+/// Peels one leading closed think block out of a finalized assistant message.
+InlineThinkSplit splitInlineThink(String text) {
+  const open = '\u003cthink\u003e';
+  const close = '\u003c/think\u003e';
+  final leading = text.replaceFirst(RegExp(r'^\s+'), '');
+  if (!leading.startsWith(open)) {
+    return InlineThinkSplit(reasoning: '', content: text);
+  }
+  final afterOpen = leading.substring(open.length);
+  final closeIndex = afterOpen.indexOf(close);
+  if (closeIndex == -1) {
+    return InlineThinkSplit(reasoning: '', content: text);
+  }
+  return InlineThinkSplit(
+    reasoning: afterOpen.substring(0, closeIndex).trim(),
+    content: afterOpen.substring(closeIndex + close.length).trim(),
+  );
 }
 
 class DeviceCode {
